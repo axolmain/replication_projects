@@ -1,7 +1,7 @@
 ---
 title: "Replication Activity"
 subtitle: "Course DS 460"
-author: "Kentucky Fried Champions"
+author: "Kentucky Fried Champions & Team Nathan"
 execute:
   warning: false
 format:
@@ -22,69 +22,218 @@ format:
         source: false
         toggle: true
         caption: See code
-    
 ---
 
-
 ```{python}
-#| label: libraries
+import requests
+from io import BytesIO
+from zipfile import ZipFile
+import re
 import polars as pl
-import pyarrow as pa
-from pyarrow import csv
-from pyarrow import dataset as ds
-import pyarrow.parquet as pq
-import plotly.express as px
-import plotly.graph_objects as go
+from lets_plot import *
 import numpy as np
-import pyreadr as r
+
+# Load data
+url = "http://scriptures.nephi.org/downloads/lds-scriptures.csv.zip"
+response = requests.get(url)
+zipfile = ZipFile(BytesIO(response.content))
+csv_file = zipfile.open('lds-scriptures.csv')
+scriptures_data = pl.read_csv(csv_file)
+
+# Load Parquet file
+sav_names = pl.read_parquet("../BoM_SaviorNames.parquet")
+
+# Create pattern
+jesuspat = "|".join(sav_names['name'].to_list())
+
+# Filter for Book of Mormon
+bofm = scriptures_data.filter(pl.col('volume_lds_url') == 'bm')
+
+def get_text(book):
+    return " ".join(bofm.filter(pl.col("book_short_title") == book)['scripture_text'].to_list())
+
+def break_sav(phrase, pattern):
+    temp = re.split(pattern, phrase)
+    word_count = [len(re.findall(r'\S+', segment)) for segment in temp]
+    return pl.DataFrame({'text': temp, 'word_count': word_count})
+
+def get_words(book):
+    df = break_sav(get_text(book), jesuspat)
+    df = df.with_columns(pl.lit(book).alias('book'))
+    return df
+
+bom_books = bofm["book_short_title"].unique().to_list()
+words_in_table = pl.concat([get_words(book) for book in bom_books])
+display(words_in_table.head())
 ```
 
+#### Description
+
+We were given a data set that contained all the verses in the canonized scriptures of the church of Jesus Christ of Latter-Day Saints. To help show that the Book of Mormon stands among other holy texts, we wanted to show how often the Savior is mentioned in the book. We also had a list of verses with one of the Savior's names mentioned. We had to combine the verses by book in the Book of Mormon and show spacing between those occurrences of His name.
+
+## Distance Between Savior's Names Visualizations
+
+#### Histogram
 
 ```{python}
-#| label: data
-#| code-summary: Read and format project data
-#| output: asis
-scrips = pl.from_arrow(
-        csv.read_csv("lds-scriptures.csv"))
-names =  pl.from_arrow(pq.read_table("../BoM_SaviorNames.parquet"))
-
+LetsPlot.setup_html()
+ggplot(words_in_table, aes("word_count")) + \
+    geom_histogram() + \
+    xlab("Index") + \
+    ylab("Distance Between Savior's Names") + \
+    ggtitle("Distance Between Savior's Names in Book of Mormon") + \
+    geom_hline(yintercept = 64.6, size = 1, color = "red") + \
+    geom_label(x = 4000, y = 65, label='64.6', fill = "red", color = "white")
 ```
 
+#### Explanation
+
+A histogram of the distance between all instances of the Savior’s name helps to really grasp the importance and centrality of Jesus Christ. The shape is heavily right skewed with the mode landing as close to zero as possible. This means that having a large number of words between the Savior’s name is very uncommon. The Savior is intertwined within the Book of Mormon just as He is intertwined with everything on this Earth. It is our goal to make Him as common in our lives as He is seen in this histogram.
+
+#### BoxPlot
+
 ```{python}
-def dist_names(dat):
-    text = list(dat.select(pl.col("scripture_text").str.to_lowercase().str.concat(" "))["scripture_text"])[0].str.split(sep=saviors_names).unlist()
+import plotly.express as px
 
-    len = (list(text.str.split(" "))).length()
+# Assuming 'df' is your DataFrame and 'column_name' is the name of the column you want to group by
+words_in_table.group_by('book').mean().sort('word_count')
 
-    return len
+# get rid of word_count outliers
+words_in_table = words_in_table.filter(pl.col('word_count') <= 250)
+
+
+fig = px.box(words_in_table,
+             y='word_count',
+             log_y=True,
+             x='book',
+             title="Distance Between Savior's Names by Book in the Book of Mormon",
+             points=False,
+             color='book',
+             color_discrete_sequence=px.colors.qualitative.Pastel,
+             labels={'word_count': 'Word Count', 'book': 'Book Name'})
+
+fig.update_xaxes(categoryorder='array', 
+                 categoryarray=words_in_table.group_by('book')
+                                             .mean()
+                                             .sort('word_count')['book'])
+# make y axis normal
+fig.update_yaxes(type='linear')
+
+fig.update_layout(
+    yaxis_title="Word Count",
+    xaxis_title="Book name",
+    template="plotly_white",
+    showlegend=False
+)
+
+# Show the figure
+fig.show()
 ```
+
+#### Explanation
+
+The graph above shows the distribution of the Savior's names between the books in the Book of Mormon. The boxplots are ordered by mean distance. Knowing that the average spacing of the Savior's names across the Book of Mormon was 64.6 words, we can see that the book of Helaman was spaced out more than average, with its mean at 96.26 words. The books of Alma and Helaman have the biggest spikes in distance, as they are heavily affected by outliers. Moroni and Mormon have the least spread in their interquatile range because they are the most consistent with testifying of the Savior while the other books have more history involved in their text.
+
 ```{python}
-aviors_names = list(names.select(pl.col("name").unique().sort().str.to_lowercase().str.concat('|'))["name"])[0]
-
-bom = scrips.filter(pl.col("volume_title") == "Book of Mormon")
-
-nested_bom = bom.group_by(pl.col("book_short_title")).all()
-
-# nested_bom["scripture_text"]
-
-dist_between_bom = nested_bom.with_columns([
-    nested_bom["scripture_text"].map(dist_names)
-])
-
+means = words_in_table.group_by('book').agg(pl.mean("word_count"))
+means = (means.with_columns([
+    pl.col("word_count").round(2).alias("mean")
+]))
+means = means.sort("word_count")
+with pl.Config(tbl_rows=15):
+    display(means[["book", "mean"]])
 ```
 
+### Class Concepts/Goals
+
+#### Additional Features
+Below is a table containing some additional features to get a wider picture of the dataset. We mapped each phrase which contains one of the Savior's names and attached some of the relevant tracking identifiers to it. We can see the Book/Chapter/Verse where the name is in, the amount of certain words appear in that phrase, and a few more identifiers.
 
 ```{python}
 
-# first visual - histogram of distance
+# Filter to Book of Mormon
+lds_scripture = scriptures_data.filter(pl.col("volume_lds_url") == "bm")
+
+# Get savior names
+savior_names = sav_names.select(["name"])
+savior_names = sav_names["name"].to_list()
 
 
-```
+# Define function to process verses
+def process_verses(df, savior_names):
+    data = []
+    specific_words = [
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "but",
+        "by",
+        "for",
+        "if",
+        "in",
+        "into",
+        "is",
+        "it",
+        "no",
+        "not",
+        "of",
+        "on",
+        "or",
+        "such",
+        "that",
+        "the",
+        "their",
+        "then",
+        "there",
+        "these",
+        "they",
+        "this",
+        "to",
+        "was",
+        "will",
+        "with",
+    ]
+
+    for row in df.to_dicts():
+        verse_text = row["scripture_text"]
+        book = row["book_title"]
+        chapter = row["chapter_number"]
+        verse = row["verse_number"]
+
+        for name in savior_names:
+            if name in verse_text:
+                words_after_name = re.split(rf"\b{name}\b", verse_text, 1)[-1].strip()
+                words_after_list = words_after_name.split()
+                num_words_after = len(words_after_list)
+
+                word_counts = {
+                    word: words_after_list.count(word) for word in specific_words
+                }
+                num_verses_covered = 1  # Since each row corresponds to a single verse
+
+                data.append(
+                    {
+                        "book": book,
+                        "chapter": chapter,
+                        "verse": verse,
+                        "words_after_name": words_after_name,
+                        "num_words_after": num_words_after,
+                        "num_verses_covered": num_verses_covered,
+                        **word_counts,
+                    }
+                )
+
+    return pl.DataFrame(data)
 
 
+# Process the verses
+processed_data = process_verses(lds_scripture, savior_names)
 
-```{python}
 
-# Second visual - boxplot of distances split by book
-
+# Show the processed data
+processed_data
 ```
